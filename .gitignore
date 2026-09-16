@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+
+# PyInstaller / 构建
+build/
+dist/
+*.spec.bak
+
+# 运行时输出（含审计邮件数据，可能敏感）
+output/
+
+# IDE
+.trae/
+.vscode/
+.idea/
+
+# 加密账号与配置（敏感，不入库）
+*.enc
+accounts.enc
+config.json
+
+# 系统
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# 日志
+*.log

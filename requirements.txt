@@ -1,0 +1,4 @@
+PySide6==6.7.0
+openpyxl==3.1.5
+beautifulsoup4==4.12.3
+cryptography==43.0.0
