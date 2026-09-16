@@ -16,7 +16,6 @@ dist/
 output/
 
 # IDE
-.trae/
 .vscode/
 .idea/
 
