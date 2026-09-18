@@ -1,4 +1,4 @@
-"""Excel 导出器 — 双 sheet 汇总表 + 账号统计"""
+"""Excel 导出器 — 三 sheet 汇总表 + 账号统计 + 关键词统计"""
 from pathlib import Path
 from typing import Optional
 
@@ -51,7 +51,7 @@ class ExcelExporter:
         headers = [
             "姓名", "账号", "文件夹", "UID", "日期",
             "发件人", "收件人", "抄送", "主题",
-            "命中关键词", "命中字段", "命中内容", "EML路径",
+            "命中关键词", "命中同义词", "命中字段", "命中内容", "EML路径",
         ]
         ws1.append(headers)
 
@@ -76,6 +76,7 @@ class ExcelExporter:
                 r.cc,
                 r.subject,
                 "\n".join(r.hit_keywords),
+                "\n".join(r.hit_synonym),
                 "\n".join(r.hit_fields),
                 r.hit_content,
                 r.eml_path,
@@ -123,6 +124,49 @@ class ExcelExporter:
                 cell.fill = PatternFill(start_color="C00000", end_color="C00000", fill_type="solid")
             for em, err in result.failures.items():
                 ws2.append([em, err])
+
+        # ========== Sheet3: 按关键词统计 ==========
+        # 每个账号 × 每个关键词一行，命中邮件数对应该关键词的命中数
+        ws3 = wb.create_sheet("按关键词统计")
+        kw_headers = ["姓名", "账号", "命中邮件数", "命中关键词", "命中的文件夹"]
+        ws3.append(kw_headers)
+        for col_idx in range(1, len(kw_headers) + 1):
+            cell = ws3.cell(row=1, column=col_idx)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        # 按 (账号, 关键词) 聚合：保留首次出现顺序
+        kw_stats = {}          # account -> {keyword -> {"count","folders","name"}}
+        account_order = []     # 账号首次出现顺序
+        for r in result.records:
+            if r.account not in kw_stats:
+                kw_stats[r.account] = {}
+                account_order.append(r.account)
+            acc_map = kw_stats[r.account]
+            for kw in r.hit_keywords:
+                if kw not in acc_map:
+                    acc_map[kw] = {"count": 0, "folders": [], "name": r.account_name}
+                acc_map[kw]["count"] += 1
+                if r.folder not in acc_map[kw]["folders"]:
+                    acc_map[kw]["folders"].append(r.folder)
+                if not acc_map[kw]["name"] and r.account_name:
+                    acc_map[kw]["name"] = r.account_name
+
+        for acc in account_order:
+            for kw, st in kw_stats[acc].items():
+                ws3.append([
+                    st["name"],
+                    acc,
+                    st["count"],
+                    kw,
+                    "\n".join(st["folders"]),
+                ])
+        ws3.freeze_panes = "A2"
+        self._auto_width(ws3, min_width=10, max_width=50)
+        for row in ws3.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
 
         # ========== 保存 ==========
         out_path = str(out_path)

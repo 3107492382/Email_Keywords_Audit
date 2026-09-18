@@ -20,10 +20,12 @@ from PySide6.QtWidgets import (
 from src.config.accounts_store import AccountsStore
 from src.config.config_manager import Config, ConfigManager
 from src.config.crypto import CryptoError
+from src.config.synonyms_store import SynonymsStore
 from src.core.excel_exporter import ExcelExporter
 from src.gui.accounts_dialog import AccountsDialog
 from src.gui.keywords_editor import KeywordsEditor
 from src.gui.result_model import ResultModel
+from src.gui.synonyms_dialog import SynonymsDialog
 from src.models.account import Account
 from src.models.records import AuditResult
 from src.workers.audit_worker import AuditWorker
@@ -73,12 +75,15 @@ class MainWindow(QMainWindow):
         self.config_mgr = ConfigManager()
         self.config: Config = self.config_mgr.load()
         self.accounts_store = AccountsStore()
+        self.synonyms_store = SynonymsStore()
         self.accounts: List[Account] = []
         self.worker: Optional[AuditWorker] = None
         self.result: Optional[AuditResult] = None
 
+        self._initializing = True
         self._build_ui()
         self._apply_config_to_ui()
+        self._initializing = False
 
         try:
             self.accounts = self.accounts_store.load()
@@ -155,12 +160,9 @@ class MainWindow(QMainWindow):
         self.chk_ssl = QCheckBox("SSL")
 
         # 自定义时手动编辑也要触发保存
-        self.input_host.editingFinished.connect(
-            lambda: self.config_mgr.save(self._collect_config_from_ui()))
-        self.input_port.valueChanged.connect(
-            lambda: self.config_mgr.save(self._collect_config_from_ui()))
-        self.chk_ssl.stateChanged.connect(
-            lambda: self.config_mgr.save(self._collect_config_from_ui()))
+        self.input_host.editingFinished.connect(self._save_config)
+        self.input_port.valueChanged.connect(self._save_config)
+        self.chk_ssl.stateChanged.connect(self._save_config)
 
         host_row = QHBoxLayout()
         host_row.addWidget(QLabel("主机:"))
@@ -212,6 +214,9 @@ class MainWindow(QMainWindow):
         btn_edit_kw = QPushButton("编辑关键词")
         btn_edit_kw.clicked.connect(self._edit_keywords)
         kw_row.addWidget(btn_edit_kw)
+        btn_synonyms = QPushButton("同义词库")
+        btn_synonyms.clicked.connect(self._manage_synonyms)
+        kw_row.addWidget(btn_synonyms)
         kw_row.addStretch()
         param_form.addRow("关键词:", kw_row)
 
@@ -372,16 +377,22 @@ class MainWindow(QMainWindow):
 
     # ==================== UI 同步 ====================
 
+    def _save_config(self):
+        """UI 变化时持久化配置（初始化阶段跳过，避免覆盖上次的值）"""
+        if not self._initializing:
+            self.config_mgr.save(self._collect_config_from_ui())
+
     def _apply_config_to_ui(self):
-        matched = None
-        for name, p in self._mail_presets.items():
-            if p["host"] == self.config.host:
-                matched = name
-                break
-        if matched:
-            self.combo_mail_type.setCurrentText(matched)
-        else:
-            self.combo_mail_type.setCurrentText("自定义")
+        # 优先用持久化的 server_key 恢复上次使用的邮箱类型；失效时按 host 兜底
+        target = self.config.server_key
+        if target not in ("腾讯企业邮箱", "QQ邮箱", "自定义"):
+            target = "自定义"
+            for name, p in self._mail_presets.items():
+                if p["host"] == self.config.host:
+                    target = name
+                    break
+        self.combo_mail_type.setCurrentText(target)
+        if target == "自定义":
             self.input_host.setText(self.config.host)
             self.input_port.setValue(self.config.port)
             self.chk_ssl.setChecked(self.config.use_ssl)
@@ -474,7 +485,7 @@ class MainWindow(QMainWindow):
             self.input_host.clear()
             self.input_port.setValue(993)
         # 切换后立即保存
-        self.config_mgr.save(self._collect_config_from_ui())
+        self._save_config()
 
     def _list_server_folders(self):
         accounts = self.accounts_store.load()
@@ -658,6 +669,13 @@ class MainWindow(QMainWindow):
             self._update_account_label()
             self._log(f"账号已更新: {len(self.accounts)} 个")
 
+    def _manage_synonyms(self):
+        dlg = SynonymsDialog(self.synonyms_store, keywords=self.config.keywords, parent=self)
+        dlg.exec()
+        syn = self.synonyms_store.load()
+        total = sum(len(v) for v in syn.values())
+        self._log(f"同义词库已更新: {len(syn)} 个主词, {total} 个同义词")
+
     # ==================== 审计 ====================
 
     def _start_audit(self):
@@ -703,6 +721,7 @@ class MainWindow(QMainWindow):
             case_sensitive=cfg.case_sensitive,
             max_workers=cfg.max_workers,
             output_dir=_output_root(),
+            synonyms=self.synonyms_store.load(),
         )
 
         self.worker.progress.connect(self._on_progress)
@@ -982,10 +1001,12 @@ class MainWindow(QMainWindow):
             account = str(row[idx.get("账号", 1)] or "")
             account_name = str(row[idx.get("姓名", 0)] or account)
             hit_kw_raw = str(row[idx.get("命中关键词", 9)] or "")
+            hit_synonym_raw = str(row[idx["命中同义词"]] or "") if "命中同义词" in idx else ""
             hit_fields_raw = str(row[idx.get("命中字段", 10)] or "")
             hit_content = str(row[idx.get("命中内容", 11)] or "")
             eml_path = str(row[idx.get("EML路径", 12)] or "")
             hit_keywords = [k.strip() for k in hit_kw_raw.replace("\n", ",").split(",") if k.strip()]
+            hit_synonym = [s.strip() for s in hit_synonym_raw.replace("\n", ",").split(",") if s.strip()]
             hit_fields = [f.strip() for f in hit_fields_raw.replace("\n", ",").split(",") if f.strip()]
 
             hit = HitRecord(
@@ -999,6 +1020,7 @@ class MainWindow(QMainWindow):
                 cc=str(row[idx.get("抄送", 7)] or ""),
                 subject=str(row[idx.get("主题", 8)] or ""),
                 hit_keywords=hit_keywords,
+                hit_synonym=hit_synonym,
                 hit_fields=hit_fields,
                 hit_content=hit_content,
                 eml_path=eml_path,

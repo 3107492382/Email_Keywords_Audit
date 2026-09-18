@@ -18,6 +18,7 @@ class HitRecord:
     hit_keywords: List[str] = field(default_factory=list)
     hit_fields: List[str] = field(default_factory=list)
     hit_content: str = ""
+    hit_synonym: List[str] = field(default_factory=list)  # 实际命中的同义词列表（主词直接命中则空）
     eml_path: str = ""
 
 

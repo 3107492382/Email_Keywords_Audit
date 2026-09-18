@@ -44,6 +44,7 @@ class AuditWorker(QThread):
                  folder_labels: Optional[Dict[str, str]] = None,
                  max_workers: int = 2,
                  output_dir: Optional[Path] = None,
+                 synonyms: Optional[Dict[str, list]] = None,
                  parent=None):
         super().__init__(parent)
         self.accounts = accounts
@@ -61,6 +62,7 @@ class AuditWorker(QThread):
         self.case_sensitive = case_sensitive
         self.max_workers = max(1, min(max_workers, 5))
         self.output_dir = output_dir or Path("output")
+        self.synonyms = synonyms or {}
         self._cancel = threading.Event()
 
     def _display(self, raw_folder: str) -> str:
@@ -81,7 +83,7 @@ class AuditWorker(QThread):
         out_base = self.output_dir / ts / "全部邮件"
         out_base.mkdir(parents=True, exist_ok=True)
 
-        matcher = KeywordMatcher(self.keywords, self.case_sensitive)
+        matcher = KeywordMatcher(self.keywords, self.case_sensitive, self.synonyms)
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_map = {
@@ -169,7 +171,7 @@ class AuditWorker(QThread):
                                 raw, account.email, display, uid, out_base,
                                 account_name=account.name or account.email,
                             )
-                            hit_kws, hit_fields, hit_content = matcher.match_record(parsed)
+                            hit_kws, hit_fields, hit_content, hit_synonym = matcher.match_record(parsed)
                             if hit_kws:
                                 acc_result.records.append(HitRecord(
                                     account=account.email,
@@ -184,6 +186,7 @@ class AuditWorker(QThread):
                                     hit_keywords=hit_kws,
                                     hit_fields=hit_fields,
                                     hit_content=hit_content,
+                                    hit_synonym=hit_synonym,
                                     eml_path=str(eml_path),
                                 ))
                                 folder_hits += 1
