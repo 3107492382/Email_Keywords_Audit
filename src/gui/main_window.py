@@ -1,5 +1,6 @@
 """主窗口 — 邮件审计工具 GUI"""
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,6 +30,7 @@ from src.gui.synonyms_dialog import SynonymsDialog
 from src.models.account import Account
 from src.models.records import AuditResult
 from src.workers.audit_worker import AuditWorker
+from src.workers.local_audit_worker import LocalAuditWorker
 
 
 def _output_root() -> Path:
@@ -79,6 +81,7 @@ class MainWindow(QMainWindow):
         self.accounts: List[Account] = []
         self.worker: Optional[AuditWorker] = None
         self.result: Optional[AuditResult] = None
+        self.local_export_dir: Optional[Path] = None  # 本地审计的导出目录（时间戳目录）
 
         self._initializing = True
         self._build_ui()
@@ -110,9 +113,48 @@ class MainWindow(QMainWindow):
         config_layout = QVBoxLayout(config_tab)
         config_layout.setSpacing(14)
 
+        # --- 审计方式 ---
+        mode_group = QGroupBox("审计方式")
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(20)
+        self.radio_online = QRadioButton("在线审计（连接服务器拉取）")
+        self.radio_local = QRadioButton("本地审计（使用已拉取的邮件目录）")
+        self.radio_online.setChecked(True)
+        self._mode_btn_group = QButtonGroup(self)
+        self._mode_btn_group.addButton(self.radio_online)
+        self._mode_btn_group.addButton(self.radio_local)
+        mode_row.addWidget(self.radio_online)
+        mode_row.addWidget(self.radio_local)
+        mode_row.addStretch()
+        mode_group.setLayout(mode_row)
+        config_layout.addWidget(mode_group)
+
+        # --- 本地邮件目录（本地审计时显示） ---
+        local_group = QGroupBox("本地邮件目录")
+        local_form = QFormLayout(local_group)
+        local_form.setLabelAlignment(Qt.AlignRight)
+        local_form.setSpacing(10)
+        dir_row = QHBoxLayout()
+        self.input_local_dir = QLineEdit()
+        self.input_local_dir.setReadOnly(True)
+        self.input_local_dir.setPlaceholderText("请选择本地邮件目录")
+        btn_browse_dir = QPushButton("浏览...")
+        btn_browse_dir.clicked.connect(self._browse_local_dir)
+        dir_row.addWidget(self.input_local_dir, stretch=1)
+        dir_row.addWidget(btn_browse_dir)
+        local_form.addRow("邮件根目录:", dir_row)
+        lbl_local_hint = QLabel("目录结构: 账号/文件夹/UID.eml；  "
+                                "邮件根目录请选择 全部邮件 目录；  "
+                                "导出结果将保存到该时间戳目录内（与 全部邮件 同级）")
+        lbl_local_hint.setWordWrap(True)
+        local_form.addRow("", lbl_local_hint)
+        self.local_group = local_group
+        local_group.setVisible(False)
+        config_layout.addWidget(local_group)
+
         # --- 服务器 ---
-        server_group = QGroupBox("服务器")
-        self._server_form = QFormLayout(server_group)
+        self.server_group = QGroupBox("服务器")
+        self._server_form = QFormLayout(self.server_group)
         self._server_form.setLabelAlignment(Qt.AlignRight)
         self._server_form.setSpacing(10)
 
@@ -183,7 +225,11 @@ class MainWindow(QMainWindow):
         self._server_form.addRow("", btn_list_folders)
 
         self._apply_preset("腾讯企业邮箱")
-        config_layout.addWidget(server_group)
+        config_layout.addWidget(self.server_group)
+
+        # 审计方式切换（在所有分组创建完成后连接）
+        self.radio_online.toggled.connect(self._on_audit_mode_changed)
+        self.radio_local.toggled.connect(self._on_audit_mode_changed)
 
         # --- 审计参数 ---
         param_group = QGroupBox("审计参数")
@@ -302,9 +348,11 @@ class MainWindow(QMainWindow):
         header.resizeSection(4, 130)   # 日期
         header.resizeSection(5, 180)   # 发件人
         header.resizeSection(6, 200)   # 主题
-        header.resizeSection(7, 120)   # 命中关键词
-        header.resizeSection(8, 80)    # 命中字段
-        header.resizeSection(9, 250)   # 命中内容
+        header.resizeSection(7, 90)    # 词汇类别
+        header.resizeSection(8, 120)   # 命中关键词
+        header.resizeSection(9, 120)   # 命中同义词
+        header.resizeSection(10, 80)   # 命中字段
+        header.resizeSection(11, 250)  # 命中内容
         self.table_view.verticalHeader().setVisible(False)
         self.table_view.setAlternatingRowColors(True)
         self.table_view.verticalHeader().setDefaultSectionSize(30)
@@ -397,6 +445,13 @@ class MainWindow(QMainWindow):
             self.input_port.setValue(self.config.port)
             self.chk_ssl.setChecked(self.config.use_ssl)
 
+        # 恢复审计方式与本地目录
+        if self.config.audit_mode == "local":
+            self.radio_local.setChecked(True)
+        else:
+            self.radio_online.setChecked(True)
+        self.input_local_dir.setText(self.config.local_dir)
+
         for chk in self.chk_folders.values():
             imap_name = chk.property("imap_name")
             chk.setChecked(imap_name in self.config.scan_folders)
@@ -418,6 +473,8 @@ class MainWindow(QMainWindow):
 
     def _collect_config_from_ui(self) -> Config:
         self.config.server_key = self.combo_mail_type.currentText()
+        self.config.audit_mode = "local" if self.radio_local.isChecked() else "online"
+        self.config.local_dir = self.input_local_dir.text().strip()
         self.config.host = self.input_host.text().strip()
         self.config.port = self.input_port.value()
         self.config.use_ssl = self.chk_ssl.isChecked()
@@ -460,6 +517,27 @@ class MainWindow(QMainWindow):
             if raw not in mapping:
                 mapping[raw] = display
         return mapping
+
+    # ==================== 审计方式切换 ====================
+
+    def _on_audit_mode_changed(self):
+        local_mode = self.radio_local.isChecked()
+        self.server_group.setVisible(not local_mode)
+        self.local_group.setVisible(local_mode)
+        self._save_config()
+
+    def _browse_local_dir(self):
+        chosen = QFileDialog.getExistingDirectory(
+            self, "选择本地邮件目录", self.input_local_dir.text() or str(_output_root()))
+        if not chosen:
+            return
+        root = Path(chosen)
+        # 若选择的是时间戳目录（其下有 全部邮件），自动下钻一层
+        if (root / "全部邮件").is_dir():
+            root = root / "全部邮件"
+        self.input_local_dir.setText(str(root))
+        self._save_config()
+        self._log(f"本地邮件目录: {root}")
 
     # ==================== 邮箱类型切换 ====================
 
@@ -655,12 +733,26 @@ class MainWindow(QMainWindow):
     # ==================== 关键词 / 账号 ====================
 
     def _edit_keywords(self):
-        dlg = KeywordsEditor(self.config.keywords, parent=self)
+        dlg = KeywordsEditor(self.config.keywords,
+                             categories=self.config.keyword_category, parent=self)
         if dlg.exec() == QDialog.Accepted:
             self.config.keywords = dlg.get_keywords()
+            self.config.keyword_category = dlg.get_categories()
             self._update_keyword_label()
             self.config_mgr.save(self.config)
             self._log(f"关键词已更新: {len(self.config.keywords)} 条")
+
+    def _merged_categories(self) -> dict:
+        """合并关键词编辑器与同义词库中的类别（关键词编辑器优先）"""
+        merged = {}
+        for kw, info in self.synonyms_store.load_full().items():
+            cat = info.get("category", "")
+            if cat:
+                merged[kw] = cat
+        for kw, cat in self.config.keyword_category.items():
+            if cat:
+                merged[kw] = cat
+        return merged
 
     def _manage_accounts(self):
         dlg = AccountsDialog(self.accounts_store, parent=self)
@@ -670,10 +762,22 @@ class MainWindow(QMainWindow):
             self._log(f"账号已更新: {len(self.accounts)} 个")
 
     def _manage_synonyms(self):
-        dlg = SynonymsDialog(self.synonyms_store, keywords=self.config.keywords, parent=self)
+        dlg = SynonymsDialog(self.synonyms_store,
+                             keywords=self.config.keywords,
+                             categories=self.config.keyword_category, parent=self)
         dlg.exec()
         syn = self.synonyms_store.load()
         total = sum(len(v) for v in syn.values())
+        # 将同义词库里维护的类别同步回配置（仅补充当前关键词中尚无类别的主词）
+        full = self.synonyms_store.load_full()
+        changed = False
+        for kw in self.config.keywords:
+            cat = full.get(kw, {}).get("category", "")
+            if cat and not self.config.keyword_category.get(kw):
+                self.config.keyword_category[kw] = cat
+                changed = True
+        if changed:
+            self.config_mgr.save(self.config)
         self._log(f"同义词库已更新: {len(syn)} 个主词, {total} 个同义词")
 
     # ==================== 审计 ====================
@@ -682,17 +786,24 @@ class MainWindow(QMainWindow):
         cfg = self._collect_config_from_ui()
         self.config_mgr.save(cfg)
 
-        problems = []
-        if not self.accounts:
-            problems.append("未配置邮箱账号")
-        if not self.config.keywords:
-            problems.append("未编辑关键词")
-        if not cfg.scan_folders and not cfg.include_junk:
-            problems.append("未选择扫描文件夹")
         d_start = self.date_start.date().toPython()
         d_end = self.date_end.date().toPython()
+        local_mode = self.radio_local.isChecked()
+
+        problems = []
+        if not self.config.keywords:
+            problems.append("未编辑关键词")
         if d_start > d_end:
             problems.append("开始日期晚于结束日期")
+        if local_mode:
+            src = self.input_local_dir.text().strip()
+            if not src or not Path(src).is_dir():
+                problems.append("本地邮件目录无效，请重新选择")
+        else:
+            if not self.accounts:
+                problems.append("未配置邮箱账号")
+            if not cfg.scan_folders and not cfg.include_junk:
+                problems.append("未选择扫描文件夹")
 
         if problems:
             detail = "\n".join(f"  - {p}" for p in problems)
@@ -703,27 +814,60 @@ class MainWindow(QMainWindow):
         self.log_text.clear()
         self.progress_bar.setValue(0)
 
-        folder_labels = self._build_folder_display_map()
+        if local_mode:
+            # 解析导出目录：选的是 全部邮件 → 其上层时间戳目录；
+            # 选的本身就是时间戳目录 → 直接用；其余情况走 output 下新建时间戳目录
+            src_path = Path(self.input_local_dir.text().strip())
+            export_dir = None
+            if src_path.name == "全部邮件":
+                export_dir = src_path.parent
+            elif re.match(r'^\d{8}_\d{6,8}$', src_path.name):
+                export_dir = src_path
+            self.local_export_dir = export_dir
 
-        self.worker = AuditWorker(
-            accounts=self.accounts,
-            keywords=self.config.keywords,
-            date_start=d_start,
-            date_end=d_end,
-            host=cfg.host,
-            port=cfg.port,
-            use_ssl=cfg.use_ssl,
-            scan_folders=cfg.scan_folders,
-            include_junk=cfg.include_junk,
-            junk_folder=cfg.junk_folder,
-            folder_labels=folder_labels,
-            match_mode=cfg.match_mode,
-            case_sensitive=cfg.case_sensitive,
-            max_workers=cfg.max_workers,
-            output_dir=_output_root(),
-            synonyms=self.synonyms_store.load(),
-        )
+            self.worker = LocalAuditWorker(
+                source_dir=src_path,
+                accounts=self.accounts,
+                keywords=self.config.keywords,
+                date_start=d_start,
+                date_end=d_end,
+                case_sensitive=cfg.case_sensitive,
+                match_mode=cfg.match_mode,
+                max_workers=cfg.max_workers,
+                output_dir=_output_root(),
+                synonyms=self.synonyms_store.load(),
+                export_dir=export_dir,
+                categories=self._merged_categories(),
+            )
+            self._log(f"本地审计开始 | 目录: {self.input_local_dir.text().strip()} | "
+                      f"{len(self.config.keywords)} 关键词 | {d_start} ~ {d_end}")
+            if export_dir:
+                self._log(f"导出目录: {export_dir}（与 全部邮件 同级）")
+        else:
+            self.local_export_dir = None
+            folder_labels = self._build_folder_display_map()
 
+            self.worker = AuditWorker(
+                accounts=self.accounts,
+                keywords=self.config.keywords,
+                date_start=d_start,
+                date_end=d_end,
+                host=cfg.host,
+                port=cfg.port,
+                use_ssl=cfg.use_ssl,
+                scan_folders=cfg.scan_folders,
+                include_junk=cfg.include_junk,
+                junk_folder=cfg.junk_folder,
+                folder_labels=folder_labels,
+                match_mode=cfg.match_mode,
+                case_sensitive=cfg.case_sensitive,
+                max_workers=cfg.max_workers,
+                output_dir=_output_root(),
+                synonyms=self.synonyms_store.load(),
+                categories=self._merged_categories(),
+            )
+            self._log(f"审计开始 | {len(self.accounts)} 账号 | "
+                      f"{len(self.config.keywords)} 关键词 | {d_start} ~ {d_end}")
         self.worker.progress.connect(self._on_progress)
         self.worker.account_started.connect(self._on_account_started)
         self.worker.account_done.connect(self._on_account_done)
@@ -735,7 +879,6 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(False)
         self.btn_cancel.setEnabled(True)
         self.btn_export.setEnabled(False)
-        self._log(f"审计开始 | {len(self.accounts)} 账号 | {len(self.config.keywords)} 关键词 | {d_start} ~ {d_end}")
 
         self.worker.start()
 
@@ -790,11 +933,15 @@ class MainWindow(QMainWindow):
         if not self.result:
             return
         try:
-            out_base = _output_root()
-            out_base.mkdir(parents=True, exist_ok=True)
-            ts_dirs = sorted([d for d in out_base.iterdir() if d.is_dir()],
-                             key=lambda d: d.stat().st_mtime, reverse=True)
-            export_path = ts_dirs[0] if ts_dirs else out_base
+            if self.local_export_dir and self.local_export_dir.is_dir():
+                # 本地审计：导出到所选目录的时间戳文件夹内（与 全部邮件 同级）
+                export_path = self.local_export_dir
+            else:
+                out_base = _output_root()
+                out_base.mkdir(parents=True, exist_ok=True)
+                ts_dirs = sorted([d for d in out_base.iterdir() if d.is_dir()],
+                                 key=lambda d: d.stat().st_mtime, reverse=True)
+                export_path = ts_dirs[0] if ts_dirs else out_base
 
             # 1. 复制命中邮件 .eml → 命中邮件/姓名/文件夹/UID.eml
             eml_out = export_path / "命中邮件"
@@ -1008,6 +1155,13 @@ class MainWindow(QMainWindow):
             hit_keywords = [k.strip() for k in hit_kw_raw.replace("\n", ",").split(",") if k.strip()]
             hit_synonym = [s.strip() for s in hit_synonym_raw.replace("\n", ",").split(",") if s.strip()]
             hit_fields = [f.strip() for f in hit_fields_raw.replace("\n", ",").split(",") if f.strip()]
+            # 词汇类别在 Excel 中按行存储、与命中关键词一一对应；旧文件无此列时补空
+            hit_cat_raw = str(row[idx["词汇类别"]] or "") if "词汇类别" in idx else ""
+            hit_categories = [c.strip() for c in hit_cat_raw.split("\n")]
+            if len(hit_categories) < len(hit_keywords):
+                hit_categories += [""] * (len(hit_keywords) - len(hit_categories))
+            else:
+                hit_categories = hit_categories[:len(hit_keywords)]
 
             hit = HitRecord(
                 account=account,
@@ -1020,6 +1174,7 @@ class MainWindow(QMainWindow):
                 cc=str(row[idx.get("抄送", 7)] or ""),
                 subject=str(row[idx.get("主题", 8)] or ""),
                 hit_keywords=hit_keywords,
+                hit_categories=hit_categories,
                 hit_synonym=hit_synonym,
                 hit_fields=hit_fields,
                 hit_content=hit_content,

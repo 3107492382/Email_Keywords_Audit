@@ -9,7 +9,7 @@ from src.models.records import AuditResult, HitRecord
 class ResultModel(QAbstractTableModel):
     """命中记录表格模型"""
 
-    HEADERS = ["姓名", "账号", "文件夹", "UID", "日期", "发件人", "主题", "命中关键词", "命中同义词", "命中字段", "命中内容"]
+    HEADERS = ["姓名", "账号", "文件夹", "UID", "日期", "发件人", "主题", "词汇类别", "命中关键词", "命中同义词", "命中字段", "命中内容"]
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -49,17 +49,26 @@ class ResultModel(QAbstractTableModel):
             if col == 4: return r.date
             if col == 5: return r.from_
             if col == 6: return r.subject
-            if col == 7: return ", ".join(r.hit_keywords)
-            if col == 8: return ", ".join(r.hit_synonym)
-            if col == 9: return ", ".join(r.hit_fields)
-            if col == 10: return r.hit_content
+            if col == 7:
+                # 类别去重后显示，保持与关键词对应的出现顺序
+                seen, uniq = set(), []
+                for c in r.hit_categories:
+                    if c and c not in seen:
+                        seen.add(c)
+                        uniq.append(c)
+                return ", ".join(uniq)
+            if col == 8: return ", ".join(r.hit_keywords)
+            if col == 9: return ", ".join(r.hit_synonym)
+            if col == 10: return ", ".join(r.hit_fields)
+            if col == 11: return r.hit_content
         elif role == Qt.ToolTipRole:
             if col == 5: return r.from_
             if col == 6: return r.subject
-            if col == 7: return "\n".join(r.hit_keywords)
-            if col == 8: return "\n".join(r.hit_synonym)
-            if col == 9: return "\n".join(r.hit_fields)
-            if col == 10: return r.hit_content
+            if col == 7: return "\n".join(r.hit_categories)
+            if col == 8: return "\n".join(r.hit_keywords)
+            if col == 9: return "\n".join(r.hit_synonym)
+            if col == 10: return "\n".join(r.hit_fields)
+            if col == 11: return r.hit_content
         return None
 
     def get_record(self, row: int) -> Optional[HitRecord]:

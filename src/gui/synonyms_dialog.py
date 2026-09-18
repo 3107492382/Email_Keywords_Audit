@@ -1,5 +1,5 @@
 """同义词库管理对话框"""
-from typing import Dict
+from typing import Dict, List
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -12,34 +12,38 @@ from src.config.synonyms_store import SynonymsStore
 
 
 class SynonymsDialog(QDialog):
-    """同义词库管理 — 主词 → 同义词列表"""
+    """同义词库管理 — 主词 → 类别 / 同义词列表"""
 
-    def __init__(self, store: SynonymsStore, keywords=None, parent=None):
+    def __init__(self, store: SynonymsStore, keywords=None,
+                 categories: Dict[str, str] = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("同义词库")
-        self.resize(700, 500)
+        self.resize(820, 520)
         self.store = store
         self._keywords = list(keywords) if keywords else []
-        self._data: Dict[str, list] = {}
+        self._categories = dict(categories or {})
+        self._data: Dict[str, dict] = {}
 
         self._load()
         self._build_ui()
         self._refresh_table()
 
     def _load(self):
-        self._data = self.store.load()
+        self._data = self.store.load_full()
         # 为关键词列表里没在同义词库里的主词补上空条目
         for kw in self._keywords:
             if kw not in self._data:
-                self._data[kw] = []
+                self._data[kw] = {"synonyms": [], "category": self._categories.get(kw, "")}
+            elif not self._data[kw].get("category") and self._categories.get(kw):
+                # 库里没类别但关键词编辑器里有，则补上
+                self._data[kw]["category"] = self._categories[kw]
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
 
         info = QLabel(
-            "每行一个主词，同义词列用逗号分隔。"
-            "匹配时主词和同义词任一命中都算该主词命中。"
+            "单个主词可添加多个同义词，各个同义词用半角逗号分隔"
         )
         info.setWordWrap(True)
         info.setStyleSheet("font-size: 13px; margin-bottom: 4px; color: palette(window-text); opacity: 0.7;")
@@ -54,8 +58,12 @@ class SynonymsDialog(QDialog):
         self.input_keyword.setPlaceholderText("主词（必须和关键词列表里的一致）")
         add_form.addRow("主词:", self.input_keyword)
 
+        self.input_category = QLineEdit()
+        self.input_category.setPlaceholderText("词汇类别，如: 财务相关、业务相关、重点对象（可留空）")
+        add_form.addRow("词汇类别:", self.input_category)
+
         self.input_synonyms = QLineEdit()
-        self.input_synonyms.setPlaceholderText("同义词，用逗号分隔，如: 协议,合约,agreement")
+        self.input_synonyms.setPlaceholderText("同义词，用半角逗号分隔，如: 协议,合约,agreement")
         add_form.addRow("同义词:", self.input_synonyms)
 
         add_btn_row = QHBoxLayout()
@@ -73,11 +81,13 @@ class SynonymsDialog(QDialog):
         table_layout = QVBoxLayout(table_group)
         table_layout.setContentsMargins(8, 8, 8, 8)
 
-        self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["主词", "同义词"])
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["词汇类别", "主词", "同义词"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         vh = self.table.verticalHeader()
         vh.setVisible(True)
@@ -107,28 +117,32 @@ class SynonymsDialog(QDialog):
     def _refresh_table(self):
         self.table.blockSignals(True)
         self.table.setRowCount(len(self._data))
-        for i, (kw, words) in enumerate(sorted(self._data.items())):
+        for i, (kw, info) in enumerate(sorted(self._data.items())):
+            cat_item = QTableWidgetItem(info.get("category", ""))
             kw_item = QTableWidgetItem(kw)
             kw_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)  # 主词列不可编辑
-            syn_item = QTableWidgetItem(", ".join(words))
-            self.table.setItem(i, 0, kw_item)
-            self.table.setItem(i, 1, syn_item)
+            syn_item = QTableWidgetItem(", ".join(info.get("synonyms", [])))
+            self.table.setItem(i, 0, cat_item)
+            self.table.setItem(i, 1, kw_item)
+            self.table.setItem(i, 2, syn_item)
         self.table.blockSignals(False)
 
     def _add_one(self):
         kw = self.input_keyword.text().strip()
+        cat = self.input_category.text().strip()
         syn_text = self.input_synonyms.text().strip()
         if not kw:
             QMessageBox.warning(self, "信息不完整", "请填写主词")
             self.input_keyword.setFocus()
             return
-        words = [w.strip() for w in syn_text.split(",") if w.strip()]
+        words = [w.strip() for w in syn_text.replace("，", ",").split(",") if w.strip()]
         words = [w for w in words if w != kw]  # 主词自身不进同义词列表
-        self._data[kw] = words
+        self._data[kw] = {"synonyms": words, "category": cat}
         self._refresh_table()
         self._save()
 
         self.input_keyword.clear()
+        self.input_category.clear()
         self.input_synonyms.clear()
         self.input_keyword.setFocus()
 
@@ -146,7 +160,7 @@ class SynonymsDialog(QDialog):
             return
         # 从表格收集当前数据
         self._collect_from_table()
-        keys = list(self._data.keys())
+        keys = list(sorted(self._data.keys()))
         for r in sorted(rows, reverse=True):
             if r < len(keys):
                 del self._data[keys[r]]
@@ -155,23 +169,29 @@ class SynonymsDialog(QDialog):
 
     def _collect_from_table(self):
         """从表格收集编辑后的数据"""
-        result = {}
+        result: Dict[str, dict] = {}
         for i in range(self.table.rowCount()):
-            kw_item = self.table.item(i, 0)
-            syn_item = self.table.item(i, 1)
+            cat_item = self.table.item(i, 0)
+            kw_item = self.table.item(i, 1)
+            syn_item = self.table.item(i, 2)
             kw = kw_item.text().strip() if kw_item else ""
+            cat = cat_item.text().strip() if cat_item else ""
             syn_text = syn_item.text().strip() if syn_item else ""
             if not kw:
                 continue
-            words = [w.strip() for w in syn_text.split(",") if w.strip()]
+            words = [w.strip() for w in syn_text.replace("，", ",").split(",") if w.strip()]
             words = [w for w in words if w != kw]
-            result[kw] = words
+            result[kw] = {"synonyms": words, "category": cat}
         self._data = result
 
     def _save(self):
         self._collect_from_table()
-        self.store.save(self._data)
+        self.store.save_full(self._data)
+
+    def get_full(self) -> Dict[str, dict]:
+        self._collect_from_table()
+        return self._data
 
     def get_synonyms(self) -> Dict[str, list]:
         self._collect_from_table()
-        return self._data
+        return {k: v["synonyms"] for k, v in self._data.items()}

@@ -45,10 +45,12 @@ class AuditWorker(QThread):
                  max_workers: int = 2,
                  output_dir: Optional[Path] = None,
                  synonyms: Optional[Dict[str, list]] = None,
+                 categories: Optional[Dict[str, str]] = None,
                  parent=None):
         super().__init__(parent)
         self.accounts = accounts
         self.keywords = keywords
+        self.categories = categories or {}
         self.date_start = date_start
         self.date_end = date_end
         self.host = host
@@ -83,7 +85,8 @@ class AuditWorker(QThread):
         out_base = self.output_dir / ts / "全部邮件"
         out_base.mkdir(parents=True, exist_ok=True)
 
-        matcher = KeywordMatcher(self.keywords, self.case_sensitive, self.synonyms)
+        matcher = KeywordMatcher(self.keywords, self.case_sensitive, self.synonyms,
+                                 self.categories)
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_map = {
@@ -171,7 +174,7 @@ class AuditWorker(QThread):
                                 raw, account.email, display, uid, out_base,
                                 account_name=account.name or account.email,
                             )
-                            hit_kws, hit_fields, hit_content, hit_synonym = matcher.match_record(parsed)
+                            hit_kws, hit_fields, hit_content, hit_synonym, hit_cats = matcher.match_record(parsed)
                             if hit_kws:
                                 acc_result.records.append(HitRecord(
                                     account=account.email,
@@ -184,6 +187,7 @@ class AuditWorker(QThread):
                                     cc=parsed.cc,
                                     subject=parsed.subject,
                                     hit_keywords=hit_kws,
+                                    hit_categories=hit_cats,
                                     hit_fields=hit_fields,
                                     hit_content=hit_content,
                                     hit_synonym=hit_synonym,

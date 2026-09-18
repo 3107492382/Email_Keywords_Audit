@@ -10,9 +10,11 @@ class KeywordMatcher:
     FIELDS = ("subject", "from", "to", "cc", "body", "attachment")
 
     def __init__(self, keywords: List[str], case_sensitive: bool = False,
-                 synonyms: Dict[str, list] = None):
+                 synonyms: Dict[str, list] = None,
+                 categories: Dict[str, str] = None):
         self.case_sensitive = case_sensitive
         self._synonyms = synonyms or {}
+        self._categories = categories or {}
 
         # 主词去重去空
         seen = set()
@@ -114,10 +116,11 @@ class KeywordMatcher:
                 sentence = sentence + "..."
         return sentence
 
-    def match_record(self, parsed: ParsedMail) -> Tuple[List[str], List[str], str, List[str]]:
-        """在邮件所有字段中匹配，返回 (命中关键词列表, 命中字段列表, 命中内容, 命中同义词列表)。
+    def match_record(self, parsed: ParsedMail) -> Tuple[List[str], List[str], str, List[str], List[str]]:
+        """在邮件所有字段中匹配，返回
+        (命中关键词列表, 命中字段列表, 命中内容, 命中同义词列表, 命中类别列表)。
         命中同义词：如果命中的是同义词而非主词本身，列出实际命中的同义词。
-        主词直接命中则该列表为空。"""
+        主词直接命中则该列表为空。命中类别与命中关键词一一对应（无类别为空字符串）。"""
         fields_text = {
             "subject": parsed.subject or "",
             "from": parsed.from_ or "",
@@ -151,4 +154,6 @@ class KeywordMatcher:
                     hit_content_parts.append(f"[{label}] {content}")
                 else:
                     hit_content_parts.append(f"[{label}] {text}")
-        return sorted(all_hits), hit_fields, "\n".join(hit_content_parts), sorted(hit_synonyms)
+        hit_kws = sorted(all_hits)
+        hit_categories = [self._categories.get(kw, "") for kw in hit_kws]
+        return hit_kws, hit_fields, "\n".join(hit_content_parts), sorted(hit_synonyms), hit_categories

@@ -22,6 +22,8 @@ class Config:
 
     def __init__(self):
         self.server_key = "腾讯企业邮箱"   # QQ邮箱（免费）/ 腾讯企业邮箱 / 自定义
+        self.audit_mode = "online"          # online=在线审计 / local=本地审计
+        self.local_dir = ""                 # 本地审计的邮件根目录（账号目录的上一级）
         self.host = "imap.exmail.qq.com"
         self.port = 993
         self.use_ssl = True
@@ -34,10 +36,13 @@ class Config:
         self.date_end = date.today().isoformat()
         self.max_workers = 2
         self.keywords: List[str] = []
+        self.keyword_category: dict = {}   # 主词 → 词汇类别（如 财务相关/业务相关）
 
     def to_dict(self) -> dict:
         return {
             "server_key": self.server_key,
+            "audit_mode": self.audit_mode,
+            "local_dir": self.local_dir,
             "host": self.host,
             "port": self.port,
             "use_ssl": self.use_ssl,
@@ -50,12 +55,15 @@ class Config:
             "date_end": self.date_end,
             "max_workers": self.max_workers,
             "keywords": self.keywords,
+            "keyword_category": self.keyword_category,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "Config":
         c = cls()
         c.server_key = d.get("server_key", "腾讯企业邮箱")
+        c.audit_mode = d.get("audit_mode", "online")
+        c.local_dir = d.get("local_dir", "")
         c.host = d.get("host", "imap.exmail.qq.com")
         c.port = d.get("port", 993)
         c.use_ssl = d.get("use_ssl", True)
@@ -68,6 +76,14 @@ class Config:
         c.date_end = d.get("date_end", date.today().isoformat())
         c.max_workers = d.get("max_workers", 2)
         c.keywords = d.get("keywords", [])
+        raw_cat = d.get("keyword_category", {})
+        # 仅保留键值均为非空字符串的映射
+        c.keyword_category = (
+            {str(k).strip(): str(v).strip()
+             for k, v in raw_cat.items()
+             if str(k).strip() and str(v).strip()}
+            if isinstance(raw_cat, dict) else {}
+        )
         return c
 
 

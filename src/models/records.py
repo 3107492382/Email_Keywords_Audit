@@ -16,6 +16,7 @@ class HitRecord:
     folder: str = ""        # 文件夹
     cc: str = ""            # 抄送
     hit_keywords: List[str] = field(default_factory=list)
+    hit_categories: List[str] = field(default_factory=list)  # 与 hit_keywords 一一对应的词汇类别
     hit_fields: List[str] = field(default_factory=list)
     hit_content: str = ""
     hit_synonym: List[str] = field(default_factory=list)  # 实际命中的同义词列表（主词直接命中则空）
